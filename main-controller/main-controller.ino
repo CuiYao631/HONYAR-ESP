@@ -98,43 +98,52 @@ void loop() {
 // 接收来自STM8的数据
 void receiveFromSTM8() {
   if (Serial2.available()) {
-    Serial.print("📡 接收数据: ");
+    String incomingData = "";
     
     // 读取所有可用数据
     while (Serial2.available()) {
       char c = Serial2.read();
-      
-      // 显示原始字符
-      Serial.print("[");
-      Serial.print(c);
-      Serial.print("/0x");
-      if (c < 16) Serial.print("0");
-      Serial.print(c, HEX);
-      Serial.print("] ");
-      
-      // 添加到接收缓冲区
-      receivedData += c;
-      
-      // 更新接收时间
-      lastReceiveTime = millis();
+      incomingData += c;
+      delay(1); // 等待更多数据到达
     }
     
-    Serial.println();
+    // 显示接收到的数据
+    Serial.print("📡 接收数据: ");
+    Serial.print("\"" + incomingData + "\" ");
+    
+    // 显示十六进制格式
+    Serial.print("(HEX: ");
+    for (int i = 0; i < incomingData.length(); i++) {
+      Serial.print("0x");
+      if ((uint8_t)incomingData[i] < 16) Serial.print("0");
+      Serial.print((uint8_t)incomingData[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println(")");
+    
+    // 更新接收时间
+    lastReceiveTime = millis();
+    totalMessagesReceived++;
     
     // 检查是否收到"test"
-    if (receivedData.endsWith("test")) {
-      Serial.println("✓ 收到STM8的test消息！");
-      totalMessagesReceived++;
+    if (incomingData.indexOf("test") != -1) {
+      Serial.println("✓ 收到STM8的test消息！数据正确");
       validMessages++;
       stm8Connected = true;
       
-      // 清空缓冲区
-      receivedData = "";
+      // 回复确认
+      sendToSTM8("ACK");
+    } else {
+      Serial.println("⚠️ 收到数据但不是预期的test消息");
+      corruptedMessages++;
     }
+    
+    // 添加到接收缓冲区用于进一步处理
+    receivedData += incomingData;
     
     // 防止缓冲区过长
     if (receivedData.length() > 100) {
-      Serial.println("⚠️ 清空缓冲区（过长）");
+      Serial.println("🗑️ 清空缓冲区（过长）");
       receivedData = "";
     }
   }
