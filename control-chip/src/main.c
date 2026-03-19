@@ -3,7 +3,8 @@
 // 寄存器地址映射
 #define REG_FLASH_DUKR    (*(volatile unsigned char *)0x5064)
 #define REG_FLASH_IAPSR   (*(volatile unsigned char *)0x505F)
-#define EEPROM_ADDR       ((volatile unsigned char *)0x4000)
+#define EEPROM_CUR_ADDR   ((volatile unsigned char *)0x4000) // 当前实际状态
+#define EEPROM_MEM_ADDR   ((volatile unsigned char *)0x4001) // 关灯前的记忆状态
 
 // 引脚定义
 #define BTN_PIN     3   // PC3
@@ -12,42 +13,53 @@
 #define LED3_PIN    4   // PC4
 #define LED4_PIN    7   // PC7
 
-// 函数声明
+static unsigned char currentStatus = 0; // 当前灯光位状态
+
 void GPIO_Init(void);
 void UART_Setup_2M_1200(void);
 void UART_SendByte(unsigned char data);
 void ApplyStatus(unsigned char status);
 void SendCurrentStatus(void);
-void EEPROM_Write(unsigned char data);
+void EEPROM_Write(volatile unsigned char* addr, unsigned char data);
 void delay_ms(unsigned int ms);
 
 void main(void) {
     unsigned char btnCurrent, btnLast = 1;
-    unsigned char savedStatus;
 
     GPIO_Init();
     UART_Setup_2M_1200();
 
-    // 1. 上电恢复：从 EEPROM 读取位状态
-    savedStatus = *EEPROM_ADDR;
-    if(savedStatus > 0x0F) savedStatus = 0; // 初始检查
-    ApplyStatus(savedStatus);
+    // 1. 上电恢复：从 EEPROM 读取当前状态
+    currentStatus = *EEPROM_CUR_ADDR;
+    if(currentStatus > 0x0F) currentStatus = 0; 
+    ApplyStatus(currentStatus);
     
     delay_ms(500);
-    SendCurrentStatus(); // 上电同步给 ESP32
+    SendCurrentStatus(); 
 
     while(1) {
-        // 2. 本地按键逻辑 (按键依然保留循环切换功能作为备用)
+        // 2. 本地按键逻辑：总开关功能
         btnCurrent = (PC_IDR & (1 << BTN_PIN)) ? 1 : 0;
         if(btnLast == 1 && btnCurrent == 0) {
-            delay_ms(20);
+            delay_ms(20); // 消抖
             if(((PC_IDR & (1 << BTN_PIN)) ? 1 : 0) == 0) {
-                // 简单的循环切换：获取当前状态并 +1 模拟切换
-                unsigned char next = (*EEPROM_ADDR + 1) & 0x0F;
-                ApplyStatus(next);
-                EEPROM_Write(next);
+                
+                if(currentStatus != 0) {
+                    // 当前有灯亮 -> 执行【全关】，并【记忆】当前状态
+                    EEPROM_Write(EEPROM_MEM_ADDR, currentStatus); // 记住这一刻的状态
+                    currentStatus = 0; 
+                } else {
+                    // 当前全灭 -> 执行【开启】，恢复【记忆】的状态
+                    currentStatus = *EEPROM_MEM_ADDR;
+                    if(currentStatus == 0) currentStatus = 0x0F; // 如果记忆也是0，默认全开
+                }
+                
+                ApplyStatus(currentStatus);
+                EEPROM_Write(EEPROM_CUR_ADDR, currentStatus); // 保存当前实况
                 SendCurrentStatus();
-                while(((PC_IDR & (1 << BTN_PIN)) ? 1 : 0) == 0);
+                
+                while(((PC_IDR & (1 << BTN_PIN)) ? 1 : 0) == 0); // 等待释放
+                delay_ms(20);
             }
         }
         btnLast = btnCurrent;
@@ -56,19 +68,16 @@ void main(void) {
         if(UART1_SR & 0x20) {
             static unsigned char rx_step = 0;
             unsigned char rx_data = UART1_DR;
-
             if(rx_step == 0 && rx_data == 0xBB) {
                 rx_step = 1;
             } else if(rx_step == 1) {
-                ApplyStatus(rx_data); // 直接应用位状态
-                EEPROM_Write(rx_data); // 记忆状态
-                SendCurrentStatus();  // 回传确认
-                rx_step = 0;
-            } else if(rx_data == 'T') { // 兼容旧的单字节触发
-                unsigned char next = (*EEPROM_ADDR + 1) & 0x0F;
-                ApplyStatus(next);
-                EEPROM_Write(next);
+                currentStatus = rx_data;
+                ApplyStatus(currentStatus);
+                EEPROM_Write(EEPROM_CUR_ADDR, currentStatus);
+                // 如果这次操作是点亮了灯，也更新一下“记忆地址”
+                if(currentStatus != 0) EEPROM_Write(EEPROM_MEM_ADDR, currentStatus);
                 SendCurrentStatus();
+                rx_step = 0;
             }
         }
         delay_ms(5);
@@ -83,19 +92,14 @@ void ApplyStatus(unsigned char status) {
 }
 
 void SendCurrentStatus(void) {
-    unsigned char s = 0;
-    if(PC_ODR & (1 << LED1_PIN)) s |= 0x01;
-    if(PC_ODR & (1 << LED2_PIN)) s |= 0x02;
-    if(PC_ODR & (1 << LED3_PIN)) s |= 0x04;
-    if(PC_ODR & (1 << LED4_PIN)) s |= 0x08;
     UART_SendByte(0xAA);
-    UART_SendByte(s);
+    UART_SendByte(currentStatus);
 }
 
-void EEPROM_Write(unsigned char data) {
+void EEPROM_Write(volatile unsigned char* addr, unsigned char data) {
     REG_FLASH_DUKR = 0xAE; REG_FLASH_DUKR = 0x56;
     while (!(REG_FLASH_IAPSR & 0x08));
-    *EEPROM_ADDR = data;
+    *addr = data;
     while (!(REG_FLASH_IAPSR & 0x04));
     REG_FLASH_IAPSR &= ~0x08;
 }
