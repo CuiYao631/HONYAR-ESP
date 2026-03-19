@@ -2,12 +2,22 @@
 #ifndef IOSTM8S103F3_H
 #define IOSTM8S103F3_H
 
+// GPIO 寄存器定义 (Port C)
+#define PC_ODR   (*(volatile unsigned char*)0x500A)  // 输出数据寄存器
+#define PC_IDR   (*(volatile unsigned char*)0x500B)  // 输入数据寄存器
+#define PC_DDR   (*(volatile unsigned char*)0x500C)  // 数据方向寄存器
+#define PC_CR1   (*(volatile unsigned char*)0x500D)  // 控制寄存器1
+#define PC_CR2   (*(volatile unsigned char*)0x500E)  // 控制寄存器2
+
 // GPIO 寄存器定义 (Port D)
 #define PD_ODR   (*(volatile unsigned char*)0x500F)  // 输出数据寄存器
 #define PD_IDR   (*(volatile unsigned char*)0x5010)  // 输入数据寄存器  
 #define PD_DDR   (*(volatile unsigned char*)0x5011)  // 数据方向寄存器
 #define PD_CR1   (*(volatile unsigned char*)0x5012)  // 控制寄存器1
 #define PD_CR2   (*(volatile unsigned char*)0x5013)  // 控制寄存器2
+
+// 时钟寄存器定义
+#define CLK_CKDIVR  (*(volatile unsigned char*)0x50C6)  // 时钟分频寄存器
 
 // UART1 寄存器定义
 #define UART1_SR    (*(volatile unsigned char*)0x5230)  // 状态寄存器

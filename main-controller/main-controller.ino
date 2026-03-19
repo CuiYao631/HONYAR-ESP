@@ -1,285 +1,73 @@
-// ESP32与STM8串口通信程序
-// 使用Serial2 (RX2: GPIO16, TX2: GPIO17)
+#include <Preferences.h>
 
-// 定义串口引脚 (ESP32默认Serial2引脚)
-#define RX2_PIN 16  // GPIO16
-#define TX2_PIN 17  // GPIO17
+#define RX2_PIN 16
+#define TX2_PIN 17
+#define BOOT_BTN 0
+#define BAUD_RATE 1200
 
-// 定义通信参数
-#define BAUD_RATE 9600
-#define BUFFER_SIZE 256
-
-// 定义按钮引脚
-#define BUTTON_PIN 0  // GPIO0 (BOOT按钮)
-
-// LED状态管理
-bool ledState = false;  // false=关灯, true=开灯
-bool buttonPressed = false;
-bool lastButtonState = HIGH;
-unsigned long lastDebounceTime = 0;
-unsigned long debounceDelay = 50;
-
-// 数据缓冲区
-String receivedData = "";
-bool dataReceived = false;
-
-// 通信状态监控
-unsigned long lastReceiveTime = 0;
-unsigned long lastHeartbeatTime = 0;
-unsigned long heartbeatInterval = 5000; // 5秒心跳
-unsigned long receiveTimeout = 3000; // 3秒接收超时
-bool stm8Connected = false;
-int totalMessagesReceived = 0;
-int corruptedMessages = 0;
-int validMessages = 0;
+Preferences prefs;
+uint8_t currentStatus = 0; // 维护本地状态位
+bool lastBtn = HIGH;
 
 void setup() {
-  // 初始化USB串口监视器 (调试用)
   Serial.begin(115200);
-  delay(1000);
-  Serial.println("ESP32-STM8串口通信初始化...");
-  
-  // 初始化Serial2与STM8通信
-  // 参数: 波特率, 数据位8, 无奇偶校验, 停止位1
   Serial2.begin(BAUD_RATE, SERIAL_8N1, RX2_PIN, TX2_PIN);
-  Serial.println("Serial2已初始化");
-  Serial.printf("RX2引脚: GPIO%d\n", RX2_PIN);
-  Serial.printf("TX2引脚: GPIO%d\n", TX2_PIN);
-  Serial.printf("波特率: %d\n", BAUD_RATE);
+  pinMode(BOOT_BTN, INPUT_PULLUP);
   
-  // 初始化GPIO0按钮
-  pinMode(BUTTON_PIN, INPUT_PULLUP);
-  Serial.println("GPIO0按钮已初始化");
+  prefs.begin("led_mem", false);
+  currentStatus = prefs.getUChar("bits", 0);
   
-  // 初始化时间记录
-  lastHeartbeatTime = millis();
-  lastReceiveTime = millis();
-  
-  Serial.println("===== 系统初始化完成 =====");
-  Serial.println("等待STM8连接...");
-  
-  // 发送初始化完成信号给STM8
-  delay(100);
-  sendToSTM8("ESP32_READY");
+  Serial.println("\n[系统就绪] 输入指令如: on1, off3, allon, alloff");
 }
 
 void loop() {
-  // 检测通信状态
-  checkCommunicationStatus();
-  
-  // 检测GPIO0按钮按下
-  checkButtonPress();
-  
-  // 接收来自STM8的数据
-  receiveFromSTM8();
-  
-  // 检查是否有来自串口监视器的命令 (用于测试)
+  // 1. 处理电脑串口输入的字符串指令
   if (Serial.available()) {
-    String command = Serial.readString();
-    command.trim();
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim(); cmd.toLowerCase();
     
-    if (command == "stats") {
-      printDetailedStats();
-    } else if (command == "clear") {
-      // 清空统计
-      totalMessagesReceived = 0;
-      validMessages = 0;
-      corruptedMessages = 0;
-      Serial.println("🗑️ 统计已清空");
-    } else {
-      Serial.println("📝 手动发送给STM8: " + command);
-      sendToSTM8(command);
+    uint8_t oldStatus = currentStatus;
+    
+    if      (cmd == "on1")    currentStatus |= 0x01;
+    else if (cmd == "off1")   currentStatus &= ~0x01;
+    else if (cmd == "on2")    currentStatus |= 0x02;
+    else if (cmd == "off2")   currentStatus &= ~0x02;
+    else if (cmd == "on3")    currentStatus |= 0x04;
+    else if (cmd == "off3")   currentStatus &= ~0x04;
+    else if (cmd == "on4")    currentStatus |= 0x08;
+    else if (cmd == "off4")   currentStatus &= ~0x08;
+    else if (cmd == "allon")  currentStatus = 0x0F;
+    else if (cmd == "alloff") currentStatus = 0x00;
+    
+    if (currentStatus != oldStatus || cmd == "sync") {
+      Serial2.write(0xBB);          // 发送控制包头
+      Serial2.write(currentStatus); // 发送控制目标位
+      Serial.printf("[发送] 目标状态更新: 0x%02X\n", currentStatus);
     }
   }
-  
-  delay(10); // 短暂延时
-}
 
-// 接收来自STM8的数据
-void receiveFromSTM8() {
-  if (Serial2.available()) {
-    String incomingData = "";
-    
-    // 读取所有可用数据
-    while (Serial2.available()) {
-      char c = Serial2.read();
-      incomingData += c;
-      delay(1); // 等待更多数据到达
+  // 2. 处理本地 Boot 按键 (循环触发)
+  bool btn = digitalRead(BOOT_BTN);
+  if (lastBtn == HIGH && btn == LOW) {
+    delay(50);
+    if (digitalRead(BOOT_BTN) == LOW) {
+      Serial2.write('T'); // 发送切换指令
+      while(digitalRead(BOOT_BTN) == LOW);
     }
-    
-    // 显示接收到的数据
-    Serial.print("📡 接收数据: ");
-    Serial.print("\"" + incomingData + "\" ");
-    
-    // 显示十六进制格式
-    Serial.print("(HEX: ");
-    for (int i = 0; i < incomingData.length(); i++) {
-      Serial.print("0x");
-      if ((uint8_t)incomingData[i] < 16) Serial.print("0");
-      Serial.print((uint8_t)incomingData[i], HEX);
-      Serial.print(" ");
-    }
-    Serial.println(")");
-    
-    // 更新接收时间
-    lastReceiveTime = millis();
-    totalMessagesReceived++;
-    
-    // 检查是否收到"test"
-    if (incomingData.indexOf("test") != -1) {
-      Serial.println("✓ 收到STM8的test消息！数据正确");
-      validMessages++;
-      stm8Connected = true;
+  }
+  lastBtn = btn;
+
+  // 3. 解析 STM8 回传的 [0xAA][Status]
+  if (Serial2.available() >= 2) {
+    if (Serial2.read() == 0xAA) {
+      currentStatus = Serial2.read();
+      prefs.putUChar("bits", currentStatus); // 存入 NVS
       
-      // 回复确认
-      sendToSTM8("ACK");
-    } else {
-      Serial.println("⚠️ 收到数据但不是预期的test消息");
-      corruptedMessages++;
-    }
-    
-    // 添加到接收缓冲区用于进一步处理
-    receivedData += incomingData;
-    
-    // 防止缓冲区过长
-    if (receivedData.length() > 100) {
-      Serial.println("🗑️ 清空缓冲区（过长）");
-      receivedData = "";
-    }
-  }
-}
-
-// 处理接收到的数据
-void processReceivedData() {
-  // 简化处理，不再需要，因为在receiveFromSTM8中已经处理
-}
-
-// 发送数据给STM8
-void sendToSTM8(String data) {
-  Serial2.println(data);
-  Serial.println("发送给STM8: " + data);
-}
-
-// 处理传感器数据
-void processSensorData(String sensorValue) {
-  // 示例：处理温度数据
-  float temperature = sensorValue.toFloat();
-  
-  if (temperature > 30.0) {
-    Serial.println("温度过高，发送警告给STM8");
-    sendToSTM8("TEMP_HIGH");
-  } else if (temperature < 10.0) {
-    Serial.println("温度过低，发送警告给STM8");
-    sendToSTM8("TEMP_LOW");
-  }
-}
-
-// 处理状态数据
-void processStatusData(String status) {
-  if (status == "OK") {
-    Serial.println("STM8状态正常");
-  } else if (status == "ERROR") {
-    Serial.println("STM8报告错误，请求复位");
-    sendToSTM8("RESET");
-  } else if (status == "BUSY") {
-    Serial.println("STM8忙碌中");
-  }
-}
-
-// 发送控制命令给STM8的便捷函数
-void sendCommand(String command, String parameter = "") {
-  String fullCommand = command;
-  if (parameter != "") {
-    fullCommand += ":" + parameter;
-  }
-  sendToSTM8(fullCommand);
-}
-
-// 检测GPIO0按钮按下 (带防抖)
-void checkButtonPress() {
-  int reading = digitalRead(BUTTON_PIN);
-  
-  // 检测状态变化
-  if (reading != lastButtonState) {
-    lastDebounceTime = millis();
-  }
-  
-  if ((millis() - lastDebounceTime) > debounceDelay) {
-    if (reading != buttonPressed) {
-      buttonPressed = reading;
-      
-      // 按钮按下 (LOW，因为使用了上拉电阻)
-      if (buttonPressed == LOW) {
-        toggleLED();
+      Serial.print("[STM8同步] ");
+      for(int i=1; i<=4; i++) {
+        Serial.printf("L%d:%s ", i, (currentStatus & (1<<(i-1))) ? "●" : "○");
       }
+      Serial.println();
     }
   }
-  
-  lastButtonState = reading;
 }
-
-// 切换LED状态
-void toggleLED() {
-  ledState = !ledState;
-  
-  if (ledState) {
-    Serial.println("🔘 按钮按下: 请求开灯");
-    sendToSTM8("LED_ON");
-  } else {
-    Serial.println("🔘 按钮按下: 请求关灯");
-    sendToSTM8("LED_OFF");
-  }
-}
-
-// LED控制函数
-void controlLED(bool state) {
-  if (state) {
-    sendToSTM8("LED_ON");
-  } else {
-    sendToSTM8("LED_OFF");
-  }
-}
-
-// 获取当前LED状态
-bool getLEDState() {
-  return ledState;
-}
-
-// 检查通信状态
-void checkCommunicationStatus() {
-  unsigned long currentTime = millis();
-  
-  // 检查是否超时未接收数据
-  if (stm8Connected && (currentTime - lastReceiveTime) > receiveTimeout) {
-    if (stm8Connected) {
-      Serial.println("⚠️  STM8通信超时！尝试重新连接...");
-      stm8Connected = false;
-      sendToSTM8("ESP32_READY");
-    }
-  }
-  
-  // 定期显示统计信息
-  static unsigned long lastStatsTime = 0;
-  if ((currentTime - lastStatsTime) > 30000) { // 每30秒
-    printDetailedStats();
-    lastStatsTime = currentTime;
-  }
-}
-
-void printStats() {
-  Serial.println("\n===== 通信状态 =====");
-  Serial.println("STM8连接: " + String(stm8Connected ? "✓ 已连接" : "✗ 断开"));
-  Serial.println("已接收消息数: " + String(totalMessagesReceived));
-  Serial.println("LED状态: " + String(ledState ? "🔆 开" : "🔅 关"));
-  Serial.println("===================\n");
-}
-
-void printDetailedStats() {
-  Serial.println("\n📊 详细通信统计:");
-  Serial.println("  接收test消息: " + String(validMessages));
-  Serial.println("  波特率: 9600 (固定)");
-  Serial.println("  STM8状态: " + String(stm8Connected ? "在线" : "离线"));
-  Serial.println("  当前缓冲区: [" + receivedData + "]");
-  Serial.println();
-}
-
