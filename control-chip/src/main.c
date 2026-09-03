@@ -22,6 +22,7 @@ void ApplyStatus(unsigned char status);
 void SendCurrentStatus(void);
 void EEPROM_Write(volatile unsigned char* addr, unsigned char data);
 void delay_ms(unsigned int ms);
+void ToggleStatus(void);
 
 void main(void) {
     unsigned char btnCurrent, btnLast = 1;
@@ -43,33 +44,21 @@ void main(void) {
         if(btnLast == 1 && btnCurrent == 0) {
             delay_ms(20); // 消抖
             if(((PC_IDR & (1 << BTN_PIN)) ? 1 : 0) == 0) {
-                
-                if(currentStatus != 0) {
-                    // 当前有灯亮 -> 执行【全关】，并【记忆】当前状态
-                    EEPROM_Write(EEPROM_MEM_ADDR, currentStatus); // 记住这一刻的状态
-                    currentStatus = 0; 
-                } else {
-                    // 当前全灭 -> 执行【开启】，恢复【记忆】的状态
-                    currentStatus = *EEPROM_MEM_ADDR;
-                    if(currentStatus == 0) currentStatus = 0x0F; // 如果记忆也是0，默认全开
-                }
-                
-                ApplyStatus(currentStatus);
-                EEPROM_Write(EEPROM_CUR_ADDR, currentStatus); // 保存当前实况
-                SendCurrentStatus();
-                
+                ToggleStatus();
                 while(((PC_IDR & (1 << BTN_PIN)) ? 1 : 0) == 0); // 等待释放
                 delay_ms(20);
             }
         }
         btnLast = btnCurrent;
 
-        // 3. 接收 ESP32 二进制指令 [0xBB][Status]
+        // 3. 接收 ESP32 指令：[0xBB][Status] 二进制包，或 'T' 单字节切换指令
         if(UART1_SR & 0x20) {
             static unsigned char rx_step = 0;
             unsigned char rx_data = UART1_DR;
             if(rx_step == 0 && rx_data == 0xBB) {
                 rx_step = 1;
+            } else if(rx_step == 0 && rx_data == 'T') {
+                ToggleStatus();
             } else if(rx_step == 1) {
                 currentStatus = rx_data;
                 ApplyStatus(currentStatus);
@@ -89,6 +78,22 @@ void ApplyStatus(unsigned char status) {
     if(status & 0x02) PC_ODR |= (1 << LED2_PIN); else PC_ODR &= ~(1 << LED2_PIN);
     if(status & 0x04) PC_ODR |= (1 << LED3_PIN); else PC_ODR &= ~(1 << LED3_PIN);
     if(status & 0x08) PC_ODR |= (1 << LED4_PIN); else PC_ODR &= ~(1 << LED4_PIN);
+}
+
+void ToggleStatus(void) {
+    if(currentStatus != 0) {
+        // 当前有灯亮 -> 执行【全关】，并【记忆】当前状态
+        EEPROM_Write(EEPROM_MEM_ADDR, currentStatus); // 记住这一刻的状态
+        currentStatus = 0;
+    } else {
+        // 当前全灭 -> 执行【开启】，恢复【记忆】的状态
+        currentStatus = *EEPROM_MEM_ADDR;
+        if(currentStatus == 0) currentStatus = 0x0F; // 如果记忆也是0，默认全开
+    }
+
+    ApplyStatus(currentStatus);
+    EEPROM_Write(EEPROM_CUR_ADDR, currentStatus); // 保存当前实况
+    SendCurrentStatus();
 }
 
 void SendCurrentStatus(void) {
