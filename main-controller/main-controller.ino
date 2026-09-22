@@ -7,8 +7,8 @@
 #define DEFAULT_SETUP_CODE "46637726"  // HomeKit默认配对码
 #define DEFAULT_QR_ID      "SWCH"      // HomeKit QR码ID
 
-#define RX2_PIN   16
-#define TX2_PIN   17
+#define RX2_PIN  21
+#define TX2_PIN   22
 #define BAUD_RATE 1200
 
 #define LED1_BIT 0x01
@@ -92,16 +92,22 @@ void onMasterButtonLongPress() {
 }
 
 void setup() {
+  
+  Serial.println("======>初始化串口1");
   Serial.begin(115200);
+  Serial.println("======>初始化串口2");
   Serial2.begin(BAUD_RATE, SERIAL_8N1, RX2_PIN, TX2_PIN);
 
+  Serial.println("======>prefs.begin");
   prefs.begin("led_mem", false);
   currentStatus = prefs.getUChar("bits", 0);
 
+  Serial.println("======>masterButton.begin");
   masterButton.begin();
   masterButton.onPressed(onMasterButtonPressed);
   masterButton.onPressedFor(LONG_PRESS_MS, onMasterButtonLongPress);
 
+  Serial.println("======>homeSpan.begin");
   homeSpan.setStatusPin(LED_INDICATOR);
   homeSpan.setQRID(DEFAULT_QR_ID);
   homeSpan.setPairingCode(DEFAULT_SETUP_CODE);
