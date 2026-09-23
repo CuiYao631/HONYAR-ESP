@@ -7,20 +7,20 @@
 #define DEFAULT_SETUP_CODE "46637726"  // HomeKit默认配对码
 #define DEFAULT_QR_ID      "SWCH"      // HomeKit QR码ID
 
-#define RX2_PIN  21
-#define TX2_PIN   22
+#define RX2_PIN  26
+#define TX2_PIN   25
 #define BAUD_RATE 1200
 
-#define LED1_BIT 0x01
-#define LED2_BIT 0x02
-#define LED3_BIT 0x04
-#define LED4_BIT 0x08
+#define OUTLET1_BIT 0x01
+#define OUTLET2_BIT 0x02
+#define OUTLET3_BIT 0x04
+#define OUTLET4_BIT 0x08
 
 const int LONG_PRESS_MS = 5000;      // 长按触发恢复出厂设置的时长
 EasyButton masterButton(SWITCH_CONTROL_PIN);
 
 Preferences prefs;
-uint8_t currentStatus = 0; // 维护本地状态位（bit0~3 对应 灯1~4）
+uint8_t currentStatus = 0; // 维护本地状态位（bit0~3 对应 插座1~4）
 
 void sendStatusToSTM8(uint8_t status) {
   Serial2.write(0xBB);   // 控制包头
@@ -31,18 +31,21 @@ void sendToggleToSTM8() {
   Serial2.write('T'); // 总开关切换指令
 }
 
-// ---------- 灯光子开关（无实体按钮） ----------
-struct DEV_LightSwitch : Service::Switch {
-  Characteristic::On switchOn{0};
+// ---------- 子插座服务 (Service::Outlet) ----------
+struct DEV_Outlet : Service::Outlet {
+  Characteristic::On outletOn{0};
+  Characteristic::OutletInUse inUse{true};
+  Characteristic::ConfiguredName *configuredName; // 支持在 HomeKit 中自定义名称
   uint8_t bitMask;
 
-  DEV_LightSwitch(uint8_t mask) : Service::Switch() {
+  DEV_Outlet(uint8_t mask, const char *defaultName) : Service::Outlet() {
     bitMask = mask;
+    configuredName = new Characteristic::ConfiguredName(defaultName);
   }
 
   boolean update() override {
-    if (switchOn.updated()) {
-      uint8_t newStatus = switchOn.getNewVal() ? (currentStatus | bitMask) : (uint8_t)(currentStatus & ~bitMask);
+    if (outletOn.updated()) {
+      uint8_t newStatus = outletOn.getNewVal() ? (currentStatus | bitMask) : (uint8_t)(currentStatus & ~bitMask);
       currentStatus = newStatus;
       sendStatusToSTM8(currentStatus); // 最终状态以 STM8 的 0xAA 回执为准
     }
@@ -50,13 +53,19 @@ struct DEV_LightSwitch : Service::Switch {
   }
 };
 
-// ---------- 总开关（实体按钮 GPIO0，兼管指示灯） ----------
-struct DEV_MasterSwitch : Service::Switch {
-  Characteristic::On switchOn{0};
+// ---------- 总开关服务 (Service::Outlet) ----------
+struct DEV_MasterOutlet : Service::Outlet {
+  Characteristic::On outletOn{0};
+  Characteristic::OutletInUse inUse{true};
+  Characteristic::ConfiguredName *configuredName;
+
+  DEV_MasterOutlet(const char *defaultName) : Service::Outlet() {
+    configuredName = new Characteristic::ConfiguredName(defaultName);
+  }
 
   boolean update() override {
-    if (switchOn.updated()) {
-      boolean wantOn = switchOn.getNewVal();
+    if (outletOn.updated()) {
+      boolean wantOn = outletOn.getNewVal();
       if (wantOn != (currentStatus != 0)) sendToggleToSTM8(); // 目标状态与当前不一致才切换
     }
     return true;
@@ -67,17 +76,21 @@ struct DEV_MasterSwitch : Service::Switch {
   }
 };
 
-DEV_MasterSwitch *masterSwitch;
-DEV_LightSwitch  *lightSwitch[4];
+DEV_MasterOutlet *masterOutlet;
+DEV_Outlet       *subOutlet[4];
 
-// 把 currentStatus 同步到全部 HomeKit 开关和指示灯（setVal 不会触发 update()）
+// 把 currentStatus 同步到全部 HomeKit 插座服务和指示灯（setVal 不会触发 update()）
 void syncHomeKitSwitches() {
-  masterSwitch->switchOn.setVal(currentStatus != 0 ? 1 : 0);
-  masterSwitch->updateIndicatorLED();
-  lightSwitch[0]->switchOn.setVal((currentStatus & LED1_BIT) ? 1 : 0);
-  lightSwitch[1]->switchOn.setVal((currentStatus & LED2_BIT) ? 1 : 0);
-  lightSwitch[2]->switchOn.setVal((currentStatus & LED3_BIT) ? 1 : 0);
-  lightSwitch[3]->switchOn.setVal((currentStatus & LED4_BIT) ? 1 : 0);
+  bool isAnyOn = (currentStatus != 0);
+  masterOutlet->outletOn.setVal(isAnyOn ? 1 : 0);
+  masterOutlet->inUse.setVal(isAnyOn);
+  masterOutlet->updateIndicatorLED();
+
+  for (int i = 0; i < 4; i++) {
+    bool isOn = (currentStatus & (1 << i)) != 0;
+    subOutlet[i]->outletOn.setVal(isOn ? 1 : 0);
+    subOutlet[i]->inUse.setVal(isOn);
+  }
 }
 
 // 实体按钮短按：交由 STM8 处理开关/记忆逻辑，真实结果通过 0xAA 回执同步
@@ -92,8 +105,6 @@ void onMasterButtonLongPress() {
 }
 
 void setup() {
-  
-  Serial.println("======>初始化串口1");
   Serial.begin(115200);
   Serial.println("======>初始化串口2");
   Serial2.begin(BAUD_RATE, SERIAL_8N1, RX2_PIN, TX2_PIN);
@@ -111,34 +122,30 @@ void setup() {
   homeSpan.setStatusPin(LED_INDICATOR);
   homeSpan.setQRID(DEFAULT_QR_ID);
   homeSpan.setPairingCode(DEFAULT_SETUP_CODE);
-  homeSpan.begin(Category::Bridges, "HONYAR灯光控制");
+  
+  // 设置为排插分类
+  homeSpan.begin(Category::Outlets, "HONYAR智能排插");
+  homeSpan.enableAutoStartAP();
 
-  // Accessory 1：桥接器本体（多配件模式下必须，本身不含任何功能服务）
+  // ==================== 单个 Accessory，内部包含 5 个 Service ====================
   new SpanAccessory();
     new Service::AccessoryInformation();
-      new Characteristic::Name("HONYAR灯光控制器");
+      new Characteristic::Name("HONYAR 智能排插");
       new Characteristic::Manufacturer("XcuiTech Inc.");
-      new Characteristic::Model("HONYAR-Bridge");
+      new Characteristic::Model("HONYAR-PowerStrip");
       new Characteristic::FirmwareRevision("1.0.0");
       new Characteristic::Identify();
 
-  // Accessory 2：总开关
-  new SpanAccessory();
-    new Service::AccessoryInformation();
-      new Characteristic::Name("总开关");
-      new Characteristic::Identify();
-    masterSwitch = new DEV_MasterSwitch();
+    // 1. 服务一：总开关
+    masterOutlet = new DEV_MasterOutlet("总开关");
 
-  // Accessory 3~6：灯1~灯4
-  const char *lightNames[4] = {"灯1", "灯2", "灯3", "灯4"};
-  const uint8_t lightBits[4] = {LED1_BIT, LED2_BIT, LED3_BIT, LED4_BIT};
-  for (int i = 0; i < 4; i++) {
-    new SpanAccessory();
-      new Service::AccessoryInformation();
-        new Characteristic::Name(lightNames[i]);
-        new Characteristic::Identify();
-      lightSwitch[i] = new DEV_LightSwitch(lightBits[i]);
-  }
+    // 2. 服务二~五：4个独立分控插座
+    const char *outletNames[4] = {"插座 1", "插座 2", "插座 3", "插座 4"};
+    const uint8_t outletBits[4] = {OUTLET1_BIT, OUTLET2_BIT, OUTLET3_BIT, OUTLET4_BIT};
+    
+    for (int i = 0; i < 4; i++) {
+      subOutlet[i] = new DEV_Outlet(outletBits[i], outletNames[i]);
+    }
 
   syncHomeKitSwitches(); // 用已保存的状态初始化 HomeKit 显示和指示灯
 
@@ -156,14 +163,14 @@ void loop() {
 
     uint8_t oldStatus = currentStatus;
 
-    if      (cmd == "on1")    currentStatus |= LED1_BIT;
-    else if (cmd == "off1")   currentStatus &= ~LED1_BIT;
-    else if (cmd == "on2")    currentStatus |= LED2_BIT;
-    else if (cmd == "off2")   currentStatus &= ~LED2_BIT;
-    else if (cmd == "on3")    currentStatus |= LED3_BIT;
-    else if (cmd == "off3")   currentStatus &= ~LED3_BIT;
-    else if (cmd == "on4")    currentStatus |= LED4_BIT;
-    else if (cmd == "off4")   currentStatus &= ~LED4_BIT;
+    if      (cmd == "on1")    currentStatus |= OUTLET1_BIT;
+    else if (cmd == "off1")   currentStatus &= ~OUTLET1_BIT;
+    else if (cmd == "on2")    currentStatus |= OUTLET2_BIT;
+    else if (cmd == "off2")   currentStatus &= ~OUTLET2_BIT;
+    else if (cmd == "on3")    currentStatus |= OUTLET3_BIT;
+    else if (cmd == "off3")   currentStatus &= ~OUTLET3_BIT;
+    else if (cmd == "on4")    currentStatus |= OUTLET4_BIT;
+    else if (cmd == "off4")   currentStatus &= ~OUTLET4_BIT;
     else if (cmd == "allon")  currentStatus = 0x0F;
     else if (cmd == "alloff") currentStatus = 0x00;
 
@@ -182,7 +189,7 @@ void loop() {
 
       Serial.print("[STM8同步] ");
       for(int i=1; i<=4; i++) {
-        Serial.printf("L%d:%s ", i, (currentStatus & (1<<(i-1))) ? "●" : "○");
+        Serial.printf("插座%d:%s ", i, (currentStatus & (1<<(i-1))) ? "●" : "○");
       }
       Serial.println();
     }
